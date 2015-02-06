@@ -160,6 +160,8 @@ map = pymc.MAP(model)
 map.fit(iterlim=nfit) # 20000
 logging.info(map)
 
+pymc.graph.graph(model)
+
 logging.info("Sampling...")
 model.mcmc.sample(iter=niters, burn=nburn, thin=nthin, progress_bar=True)
 #pymc.Matplot.plot(mcmc)

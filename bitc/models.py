@@ -5,7 +5,7 @@ PyMC models to describe ITC binding experiments
 """
 
 
-
+from abc import ABCMeta, abstractmethod
 import numpy
 import pymc
 import copy
@@ -151,7 +151,9 @@ class BindingModel(object):
     Abstract base class for reaction models.
 
     """
+    __metaclass__ = ABCMeta
 
+    @abstractmethod
     def __init__(self):
         pass
 
@@ -315,6 +317,105 @@ class TwoComponentBindingModel(BindingModel):
         return numpy.exp(-2.0*log_sigma)
 
     # TODO Add specific createModel() for this binding model (move from ITC.py).
+
+
+class MultipleExperimentModel(BindingModel):
+    """A model that can interpret multiple experiments in one."""
+    def __init__(self, experiments, instrument, calibrations=None):
+
+        # See if we have a single or list/array of experiments
+        try:
+            self.experiments = list(experiments)
+        except TypeError:
+            from bitc.experiments import Experiment
+            assert isinstance(experiments, Experiment)
+            self.experiments = [experiments]
+
+        # Verify whether we have calibration experiments to help determine sigma
+        if calibrations is None:
+            self.calibrations = list()
+        else:
+            assert isinstance(calibrations, list)
+
+        # Experimental temperature is taken to be the same in all experiments
+        self.temperature = experiments[0].temperature.to('kelvin')
+        self.beta = (1.0 / (ureg.molar_gas_constant * self.temperature)).to('1 / (kcal per mol)')
+
+        self.V0 = instrument.V0
+
+        # retrieve species for which concentrations should be linked
+        # Presumably, splits up into
+        # receptor && cofactors ||  ligands
+        self.common_components, self.individual_components = self._find_chemical_relationships()
+
+        #Accumulate stochastics here
+        self.stochastics = list()
+
+        logger.debug("Individual components in experiments:")
+        logger.debug(self.individual_components)
+        logger.debug("Common components in experiments:")
+        logger.debug(self.common_components)
+
+
+        # Define some reasonable bounds on deltaG and deltaH
+        deltaGmin, deltaGmax = Quantity([-40, 40], 'kcal / mol')
+        deltaHmin, deltaHmax = Quantity([-100, 100], 'kcal / mol')
+
+        # TODO add option for literature values to be added.
+
+        # For every individual experimental component, add a deltaG and deltaH prior to the model
+        for component in self.individual_components:
+            name = "DeltaG of %s * %s" % (self.common_components, component)
+            self.stochastics.append(pymc.Uniform(name, lower=deltaGmin, upper=deltaGmax, value=0.0))
+            name = "DeltaH of %s * %s" % (self.common_components, component)
+            self.stochastics.append(pymc.Uniform(name, lower=deltaHmin, upper=deltaHmax, value=0.0))
+
+
+        # For every experiment, try and find the delta H0
+        # Also, every experiment has different true concentrations
+        # And different true
+        for experiment in experiments:
+
+            # H0
+            # We allow the heat of dilution/mixing to range in observed range of heats, plus a larger margin of the range of oberved heats.
+            max_heat = experiment.observed_injection_heats.max()
+            min_heat = experiment.observed_injection_heats.min()
+            heat_interval = max_heat - min_heat
+             # last injection heat provides a good initial guess for heat of dilution/mixing
+            last_heat = experiment.observed_injection_heats[-1]
+            self.stochastics.append(
+                pymc.Uniform("DeltaH_0 for experiment %s" % experiment.name, lower=min_heat - heat_interval, upper=max_heat + heat_interval, value=last_heat))
+
+
+            # True concentrations
+            for species, concentration in experiment.sample_cell_concentrations.iteritems():
+                x = pymc.Lognormal("initial sample cell concentration of %s in experiment %d" % (species, index),
+                                   mu=log(concentration), tau=1.0 / log(1.0 + concentration_uncertainty ** 2),
+                                   value=concentration)
+                experiment.true_sample_cell_concentrations[species] = x
+                self.stochastics.append(x)
+
+            experiment.true_syringe_concentrations = dict()
+            for species, concentration in experiment.syringe_concentrations.iteritems():
+                x = pymc.Lognormal("initial syringe concentration of %s in experiment %d" % (species, index),
+                                   mu=log(concentration), tau=1.0 / log(1.0 + concentration_uncertainty ** 2),
+                                   value=concentration)
+                experiment.true_syringe_concentrations[species] = x
+                self.stochastics.append(x)
+
+
+
+
+
+
+
+    @abstractmethod
+    def _find_chemical_relationships(self):
+        """"""
+        return
+
+
+
 
 
 class CompetitiveBindingModel(BindingModel):
